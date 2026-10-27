@@ -1,0 +1,2117 @@
+---
+title: "Synthea Hospital Analizi"
+author: "Ziyad Ahmadzada"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    number_sections: true
+    code_folding: show
+    encoding: "UTF-8"
+lang: az
+---
+
+```{r libraries-and-data}
+library(data.table)   # Böyük data manipulyasiyası
+library(ggplot2)      # Statik qrafikler
+library(plotly)       # İnteraktiv qrafikler
+library(dplyr)        # Data manipulyasiyası
+library(lubridate)    # Tarix emeliyyatları
+library(scales)       # Ox formatları
+library(knitr)        # Cedvel çıxışı
+library(kableExtra)   # Cedvel dizaynı
+library(reshape2)     # dcast/melt emeliyyatları
+library(corrplot)     # Korrelyasiya matrix
+library(survival)     # Kaplan-Meier (ölüm analizi)
+library(forecast)
+library(tseries)
+patients     <- readRDS("patients.rds")
+encounters   <- readRDS("encounters.rds")
+observations <- readRDS("observations.rds")
+```
+
+# Deskriptiv Analiz
+
+Bu bölmede Synthea Hospital dataset-inin **132,607 xeste**, **1,263,669 encounter** ve **5,383,318 müşahide**den ibaret üç esas cedvelini ayrı-ayrılıqda ve birleşdirilmiş şekilde araşdırırıq. Meqsed — xeste demoqrafiyası, encounter strukturu, klinik ölçmeler ve xestelik prevalensi haqqında tam menzere elde etmekdir.
+
+## Datasetin İlkin Yoxlanılması
+
+Her üç dataset-in ölçüleri, ilk setirleri ve boş (NA) deyerlerin paylanması.
+
+```{r dimensions}
+dim(patients)
+dim(encounters)
+dim(observations)
+```
+
+```{r overview}
+head(patients, 3)
+head(encounters, 3)
+head(observations, 3)
+
+colSums(is.na(patients))
+colSums(is.na(encounters))
+colSums(is.na(observations))
+```
+
+```{r patients-summary}
+summary(patients[, .(BIRTHDATE, DEATHDATE, GENDER, RACE, ETHNICITY, MARITAL)])
+```
+
+## Xeste Demografiyası
+
+### Yaş Hesablanması ve Paylanması
+
+Yaş **doğum tarixinden** hesablanır. Vefat etmiş xesteler üçün son tarix `DEATHDATE`, sağ xesteler üçün ise bugünkü tarix götürülür.
+
+```{r age-fix-final}
+patients[, age := as.integer(
+  difftime(
+    fifelse(is.na(DEATHDATE), as.IDate("2017-12-31"), DEATHDATE),
+    BIRTHDATE, units = "days"
+  ) / 365.25
+)]
+summary(patients$age)   # ← master yox, patients
+```
+
+
+```{r plot-age}
+age_data <- patients[, .N, by = age][order(age)]
+
+plot_ly(
+  data = age_data,
+  x    = ~age,
+  y    = ~N,
+  type = "bar",
+  marker = list(color = "#7F77DD")
+) |>
+  layout(
+    title  = "Xestelerin yaş paylanması",
+    xaxis  = list(title = "Yaş"),
+    yaxis  = list(title = "Xeste sayı"),
+    hovermode = "x"
+  )
+```
+
+```{r plot-age-v2}
+age_grouped <- patients[, .(N = .N), by = .(age_group = cut(age,
+  breaks = c(0,5,10,20,30,40,50,60,70,80,90,Inf),
+  labels = c("0-4","5-9","10-19","20-29","30-39",
+             "40-49","50-59","60-69","70-79","80-89","90+"),
+  right = FALSE
+))][order(age_group)]
+
+plot_ly(
+  data   = age_grouped,
+  x      = ~age_group,
+  y      = ~N,
+  type   = "bar",
+  marker = list(
+    color = ~N,
+    colorscale = "Viridis",
+    showscale  = TRUE
+  ),
+  hovertemplate = "<b>%{x}</b><br>Xeste sayı: %{y}<extra></extra>"
+) |>
+  layout(
+    title = "Xestelerin yaş qrupu üzre paylanması",
+    xaxis = list(title = "Yaş qrupu"),
+    yaxis = list(title = "Xeste sayı")
+  )
+```
+
+### Gender Paylanması
+
+```{r gender-summary}
+# Gender say ve faiz
+patients[, .N, by = GENDER]
+
+patients[, .(
+  N = .N,
+  faiz = round(.N/nrow(patients)*100, 1)
+), by = GENDER]
+```
+
+```{r gender-plot}
+gender_data <- patients[, .(
+  N    = .N,
+  faiz = round(.N/nrow(patients)*100, 1)
+), by = GENDER]
+
+plot_ly(
+  data   = gender_data,
+  labels = ~GENDER,
+  values = ~N,
+  type   = "pie",
+  hole   = 0.6,
+  marker = list(colors = c("#D4537E", "#378ADD")),
+  textinfo = "label+percent",
+  hovertemplate = "<b>%{label}</b><br>Xeste sayı: %{value}<br>Faiz: %{percent}<extra></extra>"
+) |>
+  layout(
+    title = list(
+      text = "Xestelerin gender üzre paylanması",
+      font = list(size = 18)
+    ),
+    legend = list(orientation = "h", x = 0.3, y = -0.1),
+    annotations = list(
+      list(
+        text      = paste0("<b>", sum(gender_data$N), "</b><br>Xeste"),
+        x         = 0.5, y = 0.5,
+        font      = list(size = 16),
+        showarrow = FALSE
+      )
+    )
+  )
+```
+
+### Race Paylanması
+
+```{r race-summary}
+patients[, .N, by = RACE][order(-N)]
+```
+
+```{r plot-race}
+race_data <- patients[, .N, by = RACE][order(-N)]
+
+plot_ly(
+  data = race_data,
+  x    = ~N,
+  y    = ~reorder(RACE, N),
+  type = "bar",
+  orientation = "h",
+  marker = list(color = "#1D9E75"),
+  hovertemplate = "<b>%{y}</b><br>Xeste sayı: %{x}<extra></extra>"
+) |>
+  layout(
+    title  = "İrq üzre xeste paylanması",
+    xaxis  = list(title = "Xeste sayı"),
+    yaxis  = list(title = "")
+  )
+```
+
+### Marital Status
+
+```{r marital-analysis}
+# Bu chunk master cedveli yaradıldıqdan sonra istifade edilir,
+# burada strukturlu yer üçün başlanğıc kodu saxlayırıq
+patients[, .N, by = MARITAL][order(-N)]
+```
+
+## Ölüm Statistikası
+
+### Ümumi Ölüm Faizi
+
+```{r mortality-overall}
+patients[, .(
+  total     = .N,
+  vefat     = sum(!is.na(DEATHDATE)),
+  sag       = sum(is.na(DEATHDATE)),
+  olum_faiz = round(mean(!is.na(DEATHDATE)) * 100, 1)
+)]
+```
+
+### Yaş Qrupu üzre Ölüm Faizi
+
+```{r mortality-by-age-v2}
+mortality_age <- patients[, .(
+  total     = .N,
+  vefat     = sum(!is.na(DEATHDATE)),
+  olum_faiz = round(sum(!is.na(DEATHDATE)) / .N * 100, 1)
+), by = .(age_group = cut(age,
+    breaks = c(0,10,20,30,40,50,60,70,80,90,Inf),
+    labels = c("0-9","10-19","20-29","30-39","40-49",
+               "50-59","60-69","70-79","80-89","90+"),
+    right = FALSE
+))][order(age_group)]
+
+mortality_age
+```
+
+```{r mortality-plot-v2}
+plot_ly(
+  data = mortality_age,
+  x    = ~age_group,
+  y    = ~olum_faiz,
+  type = "bar",
+  marker = list(
+    color = ~olum_faiz,
+    colorscale = list(c(0,"#378ADD"), c(1,"#D4537E")),
+    showscale = FALSE
+  ),
+  hovertemplate = "<b>%{x}</b><br>Ölüm faizi: %{y}%<br>Vefat sayı: %{customdata}<extra></extra>",
+  customdata = ~vefat
+) |>
+  layout(
+    title = "Yaş qrupu üzre ölüm faizi",
+    xaxis = list(title = "Yaş qrupu"),
+    yaxis = list(title = "Ölüm faizi (%)"),
+    shapes = list(
+      list(type = "line", x0 = -0.5, x1 = 9.5,
+           y0 = 24.9, y1 = 24.9,
+           line = list(color = "orange", dash = "dash", width = 2))
+    ),
+    annotations = list(
+      list(x = 5, y = 27, text = "Ümumi orta: 24.9%",
+           showarrow = FALSE, font = list(color = "orange"))
+    )
+  )
+```
+
+## Encounter Analizi
+
+### Encounter Növleri ve Top 10
+
+```{r encounters-summary}
+# Encounter növleri
+encounters[, .N, by = DESCRIPTION][order(-N)]
+
+# Xeste başına encounter sayı
+enc_per_pt <- encounters[, .N, by = PATIENT]
+summary(enc_per_pt$N)
+```
+
+```{r plot-encounter-types}
+enc_top10 <- encounters[, .N, by = DESCRIPTION][order(-N)][1:10]
+
+plot_ly(
+  data = enc_top10,
+  x    = ~N,
+  y    = ~reorder(DESCRIPTION, N),
+  type = "bar",
+  orientation = "h",
+  marker = list(color = "#D4537E"),
+  hovertemplate = "<b>%{y}</b><br>Say: %{x}<extra></extra>"
+) |>
+  layout(
+    title  = "en çox rast gelinen encounter növleri (Top 10)",
+    xaxis  = list(title = "Say"),
+    yaxis  = list(title = "")
+  )
+```
+
+### İllik Encounter Trendi
+
+```{r encounter-trend}
+enc_trend <- encounters[, .(N = .N), by = year(DATE)][order(year)]
+
+plot_ly(
+  data = enc_trend,
+  x    = ~year,
+  y    = ~N,
+  type = "scatter",
+  mode = "lines+markers",
+  line   = list(color = "#1D9E75", width = 3),
+  marker = list(color = "#1D9E75", size = 8),
+  hovertemplate = "<b>%{x}</b><br>Encounter sayı: %{y}<extra></extra>"
+) |>
+  layout(
+    title = "İller üzre encounter sayının trendi",
+    xaxis = list(title = "İl"),
+    yaxis = list(title = "Encounter sayı", tickformat = ",")
+  )
+```
+
+```{r encounter-trend-v2}
+enc_trend <- encounters[year(DATE) >= 2010, 
+                        .(N = .N), by = year(DATE)][order(year)]
+
+plot_ly(
+  data = enc_trend,
+  x    = ~year,
+  y    = ~N,
+  type = "scatter",
+  mode = "lines+markers",
+  line   = list(color = "#1D9E75", width = 3),
+  marker = list(color = "#1D9E75", size = 8),
+  hovertemplate = "<b>%{x}</b><br>Encounter sayı: %{y}<extra></extra>"
+) |>
+  layout(
+    title = "İller üzre encounter sayının trendi (2010-2019)",
+    xaxis = list(title = "İl", dtick = 1),
+    yaxis = list(title = "Encounter sayı", tickformat = ",")
+  )
+```
+
+### Aylar üzre Mövsümi Trend
+
+```{r seasonal-trend}
+encounters[, month := month(DATE)]
+
+monthly_enc <- encounters[year(DATE) >= 2011 & year(DATE) <= 2016,
+                          .(N = .N), by = month][order(month)]
+
+month_names <- c("Yanvar","Fevral","Mart","Aprel","May","İyun",
+                 "İyul","Avqust","Sentyabr","Oktyabr","Noyabr","Dekabr")
+monthly_enc[, month_name := factor(month_names[month], levels = month_names)]
+
+plot_ly(
+  data = monthly_enc,
+  x    = ~month_name,
+  y    = ~N,
+  type = "bar",
+  marker = list(
+    color = ~N,
+    colorscale = list(c(0,"#378ADD"), c(1,"#D4537E")),
+    showscale = FALSE
+  ),
+  hovertemplate = "<b>%{x}</b><br>Encounter sayı: %{y:,}<extra></extra>"
+) |>
+  layout(
+    title = list(text = "Aylar üzre encounter trendi (2011-2016 ortalaması)"),
+    xaxis = list(title = list(text = "Ay")),
+    yaxis = list(title = list(text = "Encounter sayı"), tickformat = ",")
+  )
+```
+
+### Müraciet Sebebleri (REASONDESCRIPTION)
+
+`REASONCODE` xanası olan **355,906 encounter** üzre diaqnoz ve müraciet sebeblerini araşdırırıq.
+
+```{r reason-analysis}
+# Sebebi olan encounterlar
+reasons <- encounters[
+  !is.na(REASONCODE) & REASONDESCRIPTION != "",
+  .N, by = REASONDESCRIPTION
+][order(-N)]
+
+cat("Sebebi olan encounter sayı:", sum(reasons$N), "\n")
+cat("Unikal diaqnoz/sebeb sayı:", nrow(reasons), "\n")
+
+# Top 15
+head(reasons, 15)
+```
+
+```{r reason-plot-v3}
+top10_reasons <- head(reasons, 10)
+top10_reasons[, color := colorRampPalette(c("#D4537E","#7F77DD"))(10)]
+
+plot_ly(
+  data = top10_reasons,
+  x    = ~N,
+  y    = ~reorder(REASONDESCRIPTION, N),
+  type = "bar",
+  orientation = "h",
+  marker = list(
+    color = ~color,
+    line  = list(color = "white", width = 0.5)
+  ),
+  hovertemplate = "<b>%{y}</b><br>Encounter sayi: %{x:,}<extra></extra>"
+) |>
+  layout(
+    title = list(
+      text = "<b>En cox rast geligen muraciet sebebleri (Top 10)</b>",
+      font = list(size = 16)
+    ),
+    xaxis = list(
+      title = "Encounter sayi",
+      tickformat = ",",
+      showgrid = TRUE,
+      gridcolor = "#f0f0f0"
+    ),
+    yaxis = list(title = "", tickfont = list(size = 11)),
+    plot_bgcolor  = "white",
+    paper_bgcolor = "white",
+    margin = list(l = 250, r = 50)
+  )
+```
+
+## Klinik Ölçmeler ve Lab Testler
+
+### Vital Signs Summary
+
+VALUE sütunu metn tipindedir, edede çevirib esas vital göstericilerin xülasesini çıxarırıq.
+
+```{r obs-summary}
+observations[, value_num := suppressWarnings(as.numeric(VALUE))]
+
+observations[
+  DESCRIPTION %in% c(
+    "Body Height", "Body Weight",
+    "Systolic Blood Pressure", "Diastolic Blood Pressure",
+    "Body Mass Index"
+  ) & !is.na(value_num),
+  .(
+    N      = .N,
+    Orta   = round(mean(value_num), 1),
+    Median = round(median(value_num), 1),
+    Min    = round(min(value_num), 1),
+    Max    = round(max(value_num), 1)
+  ),
+  by = .(DESCRIPTION, UNITS)
+]
+```
+
+### BMI Paylanması
+
+```{r plot-bmi}
+bmi_data <- observations[DESCRIPTION == "Body Mass Index" & !is.na(value_num)]
+
+plot_ly(
+  data = bmi_data,
+  x    = ~value_num,
+  type = "histogram",
+  nbinsx = 50,
+  marker = list(color = "#378ADD"),
+  hovertemplate = "BMI: %{x}<br>Say: %{y}<extra></extra>"
+) |>
+  layout(
+    title  = "Xestelerin BMI paylanması",
+    xaxis  = list(title = "BMI (kg/m2)"),
+    yaxis  = list(title = "Xeste sayı"),
+    shapes = list(
+      list(type = "line", x0 = 18.5, x1 = 18.5,
+           y0 = 0, y1 = 1, yref = "paper",
+           line = list(color = "orange", dash = "dash")),
+      list(type = "line", x0 = 25, x1 = 25,
+           y0 = 0, y1 = 1, yref = "paper",
+           line = list(color = "red", dash = "dash")),
+      list(type = "line", x0 = 30, x1 = 30,
+           y0 = 0, y1 = 1, yref = "paper",
+           line = list(color = "darkred", dash = "dash"))
+    ),
+    annotations = list(
+      list(x = 18.5, y = 1, yref = "paper", text = "Underweight", showarrow = FALSE, xanchor = "right"),
+      list(x = 25,   y = 1, yref = "paper", text = "Normal",      showarrow = FALSE, xanchor = "right"),
+      list(x = 30,   y = 1, yref = "paper", text = "Overweight",  showarrow = FALSE, xanchor = "right")
+    )
+  )
+```
+
+### HbA1c ve Diabetes Risk
+
+HbA1c ≥ 6.5% diabet, 5.7–6.5% prediabet, < 5.7% normal qebul olunur.
+
+```{r hba1c-analysis}
+hba1c <- observations[
+  DESCRIPTION == "Hemoglobin A1c/Hemoglobin.total in Blood" & 
+  !is.na(value_num)
+][order(PATIENT, DATE)][, .SD[.N], by = PATIENT]
+
+hba1c[, risk_group := fcase(
+  value_num < 5.7,  "Normal",
+  value_num < 6.5,  "Prediabet",
+  value_num >= 6.5, "Diabet riski"
+)]
+
+hba1c[, .N, by = risk_group]
+```
+
+```{r hba1c-plot}
+hba1c_summary <- hba1c[, .N, by = risk_group]
+hba1c_summary[, faiz := round(N/sum(N)*100, 1)]
+
+plot_ly(
+  data   = hba1c_summary,
+  labels = ~risk_group,
+  values = ~N,
+  type   = "pie",
+  hole   = 0.6,
+  marker = list(colors = c("#D4537E", "#F4A261", "#1D9E75")),
+  textinfo = "label+percent",
+  hovertemplate = "<b>%{label}</b><br>Xeste sayı: %{value}<br>Faiz: %{percent}<extra></extra>"
+) |>
+  layout(
+    title = "HbA1c üzre diabetes risk qrupları",
+    annotations = list(
+      list(text = "<b>32,309</b><br>Xeste",
+           x = 0.5, y = 0.5,
+           showarrow = FALSE,
+           font = list(size = 14))
+    )
+  )
+```
+
+### Lipid Paneli
+
+Total Cholesterol, LDL, HDL ve Triglyceride üzre deskriptiv xülase ve boxplot müqayisesi.
+
+```{r lipid-panel}
+lipids <- observations[
+  DESCRIPTION %in% c(
+    "Total Cholesterol",
+    "Low Density Lipoprotein Cholesterol",
+    "High Density Lipoprotein Cholesterol",
+    "Triglycerides"
+  ) & !is.na(value_num)
+]
+
+lipid_summary <- lipids[, .(
+  N      = .N,
+  Orta   = round(mean(value_num), 1),
+  Median = round(median(value_num), 1),
+  Min    = round(min(value_num), 1),
+  Max    = round(max(value_num), 1)
+), by = .(DESCRIPTION, UNITS)]
+
+lipid_summary
+```
+
+```{r lipid-plot}
+plot_ly(
+  data = lipids,
+  y    = ~value_num,
+  color = ~DESCRIPTION,
+  type  = "box",
+  colors = c("#D4537E", "#7F77DD", "#1D9E75", "#F4A261"),
+  hovertemplate = "<b>%{fullData.name}</b><br>Deyer: %{y} mg/dL<extra></extra>"
+) |>
+  layout(
+    title  = list(text = "Lipid paneli — Boxplot müqayisesi"),
+    yaxis  = list(title = list(text = "Deyer (mg/dL)")),
+    xaxis  = list(title = list(text = "")),
+    showlegend = FALSE,
+    shapes = list(
+      list(type = "line", x0 = -0.5, x1 = 3.5,
+           y0 = 200, y1 = 200,
+           line = list(color = "red", dash = "dash", width = 1.5))
+    ),
+    annotations = list(
+      list(x = 3.3, y = 210, text = "Total Chol norma: 200",
+           showarrow = FALSE, font = list(color = "red", size = 10))
+    )
+  )
+```
+
+## İnteqrasiya — Master Cedvel
+
+Her üç dataset-i `patients` cedveli merkezinde birleşdiririk: encounter sayı ve her xestenin son vital ölçüleri (BMI, SBP, DBP) elave olunur. Netice: **132,607 setir × 22 sütun.**
+
+```{r master-join}
+# Encounter sayı her xeste üçün
+enc_count <- encounters[, .(enc_count = .N), by = PATIENT]
+
+# Her xestenin son vital ölçüleri
+last_vitals <- observations[
+  DESCRIPTION %in% c(
+    "Body Mass Index",
+    "Systolic Blood Pressure",
+    "Diastolic Blood Pressure"
+  ) & !is.na(value_num)
+][order(PATIENT, DATE)][
+  , .SD[.N], by = .(PATIENT, DESCRIPTION)
+] |> dcast(PATIENT ~ DESCRIPTION, value.var = "value_num")
+
+setnames(last_vitals,
+  old = c("Body Mass Index", "Diastolic Blood Pressure", "Systolic Blood Pressure"),
+  new = c("bmi", "dbp", "sbp")
+)
+
+# Master cedvel
+master <- patients |>
+  merge(enc_count,   by.x = "ID", by.y = "PATIENT", all.x = TRUE) |>
+  merge(last_vitals, by.x = "ID", by.y = "PATIENT", all.x = TRUE)
+
+dim(master)
+head(master[, .(ID, age, GENDER, RACE, enc_count, bmi, sbp, dbp)], 5)
+master[, age := patients[match(master$ID, patients$ID), age]]
+
+summary(master$age)
+```
+
+## Aqreqasiyalar
+
+Master cedvel üzerinde qrup ortalamalarını çıxarırıq.
+
+### Yaş Qrupu × Vital Signs
+
+```{r age-aggregation}
+master[!is.na(bmi) & !is.na(sbp) & !is.na(dbp), .(
+  N       = .N,
+  ort_bmi = round(mean(bmi), 1),
+  ort_sbp = round(mean(sbp), 1),
+  ort_dbp = round(mean(dbp), 1),
+  ort_enc = round(mean(enc_count), 1)
+), by = .(age_group = cut(age,
+    breaks = c(0,10,20,30,40,50,60,70,80,90,Inf),
+    labels = c("0-9","10-19","20-29","30-39","40-49",
+               "50-59","60-69","70-79","80-89","90+"),
+    right  = FALSE
+))][order(age_group)]
+```
+
+```{r age-bmi-plot}
+age_agg <- master[!is.na(bmi) & !is.na(sbp) & !is.na(dbp), .(
+  ort_bmi = round(mean(bmi), 1),
+  ort_sbp = round(mean(sbp), 1),
+  ort_dbp = round(mean(dbp), 1)
+), by = .(age_group = cut(age,
+    breaks = c(0,10,20,30,40,50,60,70,80,90,Inf),
+    labels = c("0-9","10-19","20-29","30-39","40-49",
+               "50-59","60-69","70-79","80-89","90+"),
+    right = FALSE
+))][order(age_group)]
+
+# 1. Yaş × BMI
+plot_ly(
+  data = age_agg,
+  x    = ~age_group,
+  y    = ~ort_bmi,
+  type = "scatter",
+  mode = "lines+markers",
+  line    = list(color = "#378ADD", width = 3),
+  marker  = list(color = "#378ADD", size = 8),
+  hovertemplate = "<b>%{x}</b><br>Orta BMI: %{y}<extra></extra>"
+) |>
+  layout(
+    title = "Yaş qrupu üzre orta BMI",
+    xaxis = list(title = "Yaş qrupu"),
+    yaxis = list(title = "Orta BMI (kg/m2)")
+  )
+```
+
+```{r age-bp-plot}
+# 2. Yaş × SBP + DBP
+plot_ly(data = age_agg, x = ~age_group) |>
+  add_trace(
+    y    = ~ort_sbp,
+    name = "Sistolik (SBP)",
+    type = "scatter",
+    mode = "lines+markers",
+    line   = list(color = "#D4537E", width = 3),
+    marker = list(color = "#D4537E", size = 8),
+    hovertemplate = "<b>%{x}</b><br>Orta SBP: %{y}<extra></extra>"
+  ) |>
+  add_trace(
+    y    = ~ort_dbp,
+    name = "Diastolik (DBP)",
+    type = "scatter",
+    mode = "lines+markers",
+    line   = list(color = "#7F77DD", width = 3),
+    marker = list(color = "#7F77DD", size = 8),
+    hovertemplate = "<b>%{x}</b><br>Orta DBP: %{y}<extra></extra>"
+  ) |>
+  layout(
+    title  = "Yaş qrupu üzre qan tezyiqi trendi",
+    xaxis  = list(title = "Yaş qrupu"),
+    yaxis  = list(title = "mmHg"),
+    legend = list(orientation = "h", x = 0.3, y = -0.2)
+  )
+```
+
+### Gender × Vital Signs
+
+```{r gender-aggregation}
+master[!is.na(bmi) & !is.na(sbp) & !is.na(dbp), .(
+  N       = .N,
+  ort_bmi = round(mean(bmi), 1),
+  ort_sbp = round(mean(sbp), 1),
+  ort_dbp = round(mean(dbp), 1),
+  ort_enc = round(mean(enc_count), 1)
+), by = GENDER]
+```
+
+```{r gender-agg-plot-v2}
+gender_agg <- master[!is.na(bmi) & !is.na(sbp) & !is.na(dbp), .(
+  ort_bmi = round(mean(bmi), 1),
+  ort_sbp = round(mean(sbp), 1),
+  ort_dbp = round(mean(dbp), 1),
+  ort_enc = round(mean(enc_count), 1)
+), by = GENDER]
+
+# 1. BMI ve Encounter sayı
+p1 <- plot_ly(data = gender_agg, x = ~GENDER) |>
+  add_trace(y = ~ort_bmi, name = "BMI",
+            type = "bar", marker = list(color = "#378ADD"),
+            hovertemplate = "<b>%{x}</b><br>BMI: %{y}<extra></extra>") |>
+  add_trace(y = ~ort_enc, name = "Enc sayı",
+            type = "bar", marker = list(color = "#1D9E75"),
+            hovertemplate = "<b>%{x}</b><br>Enc sayı: %{y}<extra></extra>") |>
+  layout(barmode = "group",
+         title = "Gender üzre BMI ve Encounter sayı",
+         xaxis = list(title = ""),
+         yaxis = list(title = "Deyer"))
+
+# 2. SBP ve DBP
+p2 <- plot_ly(data = gender_agg, x = ~GENDER) |>
+  add_trace(y = ~ort_sbp, name = "SBP",
+            type = "bar", marker = list(color = "#D4537E"),
+            hovertemplate = "<b>%{x}</b><br>SBP: %{y}<extra></extra>") |>
+  add_trace(y = ~ort_dbp, name = "DBP",
+            type = "bar", marker = list(color = "#7F77DD"),
+            hovertemplate = "<b>%{x}</b><br>DBP: %{y}<extra></extra>") |>
+  layout(barmode = "group",
+         title = "Gender üzre qan tezyiqi",
+         xaxis = list(title = ""),
+         yaxis = list(title = "mmHg", range = c(80, 140)))
+
+p1
+p2
+```
+
+### Marital Status × Health
+
+```{r marital-health-analysis}
+master[!is.na(bmi) & !is.na(sbp), .(
+  N       = .N,
+  ort_bmi = round(mean(bmi), 1),
+  ort_sbp = round(mean(sbp), 1),
+  ort_dbp = round(mean(dbp), 1),
+  ort_enc = round(mean(enc_count), 1)
+), by = MARITAL][order(-N)]
+```
+
+```{r marital-age-check}
+master[MARITAL == "", .(
+  ort_yas = round(mean(age), 1),
+  min_yas = min(age),
+  max_yas = max(age)
+)]
+```
+
+## Xestelik Prevalensi ve Ölüm Sebebleri
+
+### Xesteliklerin İdentifikasiyası
+
+`observations`-da `disorder`, `disease`, `infarction`, `stroke`, `cancer`, `arrest`, `pneumonia`, `overdose`, `carcinoma` açar sözleri ile xestelik qeydlerini tapırıq.
+
+```{r all-diseases-check}
+all_diseases <- observations[, .(xeste_sayi = uniqueN(PATIENT)), by = DESCRIPTION]
+nrow(all_diseases)
+```
+
+```{r all-diseases-find}
+disease_keywords <- "disorder|disease|infarction|stroke|cancer|arrest|pneumonia|overdose|carcinoma"
+
+all_diseases <- observations[
+  grepl(disease_keywords, DESCRIPTION, ignore.case = TRUE),
+  .(xeste_sayi = uniqueN(PATIENT),
+    prevalens  = round(uniqueN(PATIENT)/132607*100, 2)),
+  by = DESCRIPTION
+][order(-xeste_sayi)]
+
+all_diseases
+```
+
+### Prevalens Reytinqi
+
+```{r prevalence-plot}
+real_diseases <- all_diseases[!grepl("Polyp size", DESCRIPTION)]
+
+# Adları qısaldaq
+real_diseases[, short_name := gsub(" \\(disorder\\)", "", DESCRIPTION)]
+
+plot_ly(
+  data = real_diseases,
+  x    = ~prevalens,
+  y    = ~reorder(short_name, prevalens),
+  type = "bar",
+  orientation = "h",
+  marker = list(
+    color = ~prevalens,
+    colorscale = list(c(0,"#378ADD"), c(1,"#D4537E")),
+    showscale = FALSE
+  ),
+  text     = ~paste0(prevalens, "%"),
+  textposition = "outside",
+  hovertemplate = "<b>%{y}</b><br>Xeste sayı: %{customdata}<br>Prevalens: %{x}%<extra></extra>",
+  customdata = ~xeste_sayi
+) |>
+  layout(
+    title = list(text = "Xestelik prevalensi (132,607 xeste üzerinde)"),
+    xaxis = list(title = list(text = "Prevalens (%)")),
+    yaxis = list(title = list(text = "")),
+    margin = list(l = 250)
+  )
+```
+
+### Xestelik × Encounter Yükü
+
+Her xesteliye göre xestelerin orta encounter sayı — xestelik sehiyye sistemine ne qeder yük verir?
+
+```{r disease-encounter}
+real_disease_list <- c(
+  "Non-small cell lung cancer (disorder)",
+  "Myocardial Infarction",
+  "Chronic obstructive bronchitis (disorder)",
+  "Pulmonary emphysema (disorder)",
+  "Stroke",
+  "Cardiac Arrest",
+  "Pneumonia",
+  "Alzheimer's disease (disorder)"
+)
+
+# Her xestelik üçün xesteleri tap ve encounter sayını hesabla
+disease_enc_summary <- rbindlist(lapply(real_disease_list, function(d) {
+  patient_ids <- unique(observations[DESCRIPTION == d]$PATIENT)
+  enc_data <- enc_per_pt[PATIENT %in% patient_ids]
+  data.table(
+    Xestelik       = gsub(" \\(disorder\\)", "", d),
+    xeste_sayi     = length(patient_ids),
+    orta_encounter = round(mean(enc_data$N), 1),
+    median_enc     = median(enc_data$N),
+    max_enc        = max(enc_data$N)
+  )
+}))[order(-orta_encounter)]
+
+disease_enc_summary
+```
+
+```{r disease-reason-encounter}
+# Encountersda REASONDESCRIPTION-de olan xestelikler
+disease_reasons <- c(
+  "Non-small cell lung cancer (disorder)",
+  "Myocardial Infarction",
+  "Chronic obstructive bronchitis (disorder)",
+  "Pulmonary emphysema (disorder)",
+  "Stroke",
+  "Alzheimer's disease (disorder)"
+)
+
+disease_enc_real <- encounters[
+  REASONDESCRIPTION %in% disease_reasons,
+  .(toplam_enc = .N,
+    xeste_sayi = uniqueN(PATIENT),
+    orta_enc_per_pt = round(.N/uniqueN(PATIENT), 1)),
+  by = REASONDESCRIPTION
+][order(-orta_enc_per_pt)]
+
+disease_enc_real
+```
+
+### Ölüm Sebebleri
+
+`observations`-da xestelik qeydi olan xestelerin vefat tarixine baxırıq ve en çox tekrarlanan ölüm sebeblerini reytinqleşdiririk.
+
+```{r death-cause-check}
+# Bir nümune xeste götürek - MI olan
+mi_patient <- observations[DESCRIPTION == "Myocardial Infarction"][1]$PATIENT
+
+# Bu xestenin patients-de DEATHDATE-i ve observations-de MI DATE-i
+patients[ID == mi_patient, .(ID, BIRTHDATE, DEATHDATE)]
+observations[PATIENT == mi_patient & DESCRIPTION == "Myocardial Infarction",
+             .(DATE, DESCRIPTION, VALUE)]
+```
+
+```{r death-cause-check-v2}
+mi_patient <- observations[DESCRIPTION == "Myocardial Infarction"][1]$PATIENT
+
+cat("Xeste ID:", mi_patient, "\n")
+cat("\nPatients cedvelinde:\n")
+print(patients[ID == mi_patient, .(BIRTHDATE, DEATHDATE)])
+
+cat("\nObservations cedvelinde MI:\n")
+print(observations[PATIENT == mi_patient & DESCRIPTION == "Myocardial Infarction",
+                   .(DATE, VALUE)])
+```
+
+```{r death-causes}
+death_causes <- rbindlist(lapply(real_disease_list, function(d) {
+  patient_ids <- unique(observations[DESCRIPTION == d]$PATIENT)
+  data.table(
+    Olum_sebebi    = gsub(" \\(disorder\\)", "", d),
+    olum_sayi      = length(patient_ids),
+    umumi_paydan   = round(length(patient_ids) / 33074 * 100, 1)
+  )
+}))[order(-olum_sayi)]
+
+death_causes
+```
+
+```{r death-causes-plot-v2}
+death_causes[, color := colorRampPalette(c("#D4537E","#7F77DD","#378ADD"))(nrow(death_causes))]
+
+plot_ly(
+  data = death_causes,
+  x    = ~umumi_paydan,
+  y    = ~reorder(Olum_sebebi, umumi_paydan),
+  type = "bar",
+  orientation = "h",
+  marker = list(color = ~color, line = list(color = "white", width = 0.5)),
+  text = ~paste0(umumi_paydan, "%"),
+  textposition = "outside",
+  hovertemplate = "<b>%{y}</b><br>Olum sayi: %{customdata:,}<br>Pay: %{x}%<extra></extra>",
+  customdata = ~olum_sayi
+) |>
+  layout(
+    title = list(
+      text = "<b>Ölüm sebebleri reytinqi</b><br><sup>33,074 vefat etmiş xeste üzerinde</sup>",
+      font = list(size = 16)
+    ),
+    xaxis = list(title = list(text = "Vefat edenlerin payı (%)"), range = c(0, 11)),
+    yaxis = list(title = list(text = "")),
+    margin = list(l = 220, r = 100)
+  )
+```
+
+## Deskriptiv Hissenin Xülasesi
+
+Deskriptiv analiz neticesinde aşağıdakı esas tapıntılar elde edildi:
+
+**Demoqrafiya**
+
+- **132,607 xeste**, gender baxımından texminen 50/50 (F: 49.8%, M: 50.2%) — sintetik dataset xüsusiyyeti
+- Dominant irq: **White (77.4%)**, ardınca Hispanic (9.7%) ve Black (7.2%)
+- Median yaş: **51**, max yaş: 108 (bioloji cehetden mümkün)
+- Ümumi ölüm faizi: **24.9%**, 90+ yaşda 87%-e çatır
+
+**Encounter Strukturu**
+
+- **1,263,669 encounter**, **28 növ** üzre
+- Dominant: **Outpatient Encounter (47%)**, Emergency room admission (3.7%), Drug addiction therapy (1.5%)
+- İllik trend 2010-2017 arasında stabil, 2017-de data kesilir
+- Mövsümi: yanvarda pik müraciet, yayda nisbi azalma
+- Top müraciet sebebi: **Viral sinusitis**, Acute bronchitis, Otitis media
+
+**Klinik Ölçmeler**
+
+- Median SBP: **129.5 mmHg** — populyasiyada hypertension seviyyesi yüksekdir
+- HbA1c ölçülen xestelerin **93%-i** prediabet/diabet riskindedir (32,309 nefer)
+- BMI median **27** — kütlevi olaraq overweight zona
+- Lipid paneli orta deyerleri normal diapazonda (Synthea hard caps sebebiyle)
+
+**Xestelik Prevalensi**
+
+- en yayğın: **Non-small cell lung cancer (2.4%)**, MI (2.2%), COPD (1.5%), Stroke (0.9%)
+- Yüksek encounter yükü olan xestelikler: COPD, Alzheimer
+- Ölüm sebebleri içinde NSCLC ve MI en tez-tez rast gelinenlerdir
+
+---
+
+
+# Anomaliya ve Data Cleaning
+
+Bu bolmede dataset-de sintetik generasiya ve ya qeydiyyat xetalari
+neticesinde yaranan anomaliyalari sistematik olaraq askar edirik.
+
+## Olumden Sonra Encounter (Ghost Encounters)
+
+Vefat etmis xestelerin olum tarixinden sonra sistemde encounter
+qeydi varmi? Bu zaman mantiqinde xeta gostericisidir.
+
+```{r anomaly-ghost-step1}
+# 1) Vefat etmiş xesteleri ayır (DEATHDATE boş olmayanlar)
+dead_patients <- patients[!is.na(DEATHDATE), .(ID, DEATHDATE)]
+
+cat("Vefat etmiş xeste sayı:", nrow(dead_patients), "\n")
+```
+
+```{r anomaly-ghost-step2}
+# 2) Vefat etmiş xestelerin BÜTÜN encounter-lerini tap
+# data.table join: dead_patients-deki ID-lere uyğun encounters tapırıq
+dead_enc <- encounters[dead_patients, on = .(PATIENT = ID)]
+
+cat("Vefat etmiş xestelerin cemi encounter sayı:", nrow(dead_enc), "\n")
+head(dead_enc[, .(PATIENT, DATE, DEATHDATE, DESCRIPTION)], 5)
+```
+
+```{r anomaly-ghost-step3}
+# 3) Anomaliya filtri: DATE > DEATHDATE
+ghost_encounters <- dead_enc[DATE > DEATHDATE]
+
+cat("Ölümden sonra encounter olan unikal xeste sayı:", 
+    uniqueN(ghost_encounters$PATIENT), "\n")
+cat("Cemi 'ghost' encounter sayı:", nrow(ghost_encounters), "\n")
+```
+
+```{r anomaly-ghost-step4}
+# 4) Bu 115 encounter hansı növlere bölünür?
+ghost_by_type <- ghost_encounters[, .N, by = DESCRIPTION][order(-N)]
+ghost_by_type
+```
+
+```{r anomaly-ghost-plot}
+# 1) Status flag-i: Normal vs Anomaliya
+ghost_by_type[, status := fifelse(
+  DESCRIPTION == "Death Certification",
+  "Normal (inzibati)",
+  "Anomaliya"
+)]
+
+# 2) Reng teyini: yaşıl = normal, qırmızı = anomaliya
+ghost_by_type[, color := fifelse(
+  status == "Normal (inzibati)", 
+  "#1D9E75",
+  "#D4537E"
+)]
+
+# 3) Horizontal bar plot
+plot_ly(
+  data = ghost_by_type,
+  x    = ~N,
+  y    = ~reorder(DESCRIPTION, N),
+  type = "bar",
+  orientation = "h",
+  marker = list(color = ~color, line = list(color = "white", width = 1)),
+  text  = ~paste0(" ", N),
+  textposition = "outside",
+  textfont = list(size = 13),
+  hovertemplate = "<b>%{y}</b><br>Say: %{x}<br>Status: %{customdata}<extra></extra>",
+  customdata = ~status
+) |>
+  layout(
+    title = list(
+      text = "<b>Olumden sonra encounter novleri</b><br><sup>115 ghost hadise — 110 normal Death Certification + 5 esl anomaliya</sup>",
+      font = list(size = 15)
+    ),
+    xaxis = list(title = "Encounter sayi",
+                 showgrid = TRUE, gridcolor = "#f0f0f0"),
+    yaxis = list(title = ""),
+    plot_bgcolor  = "white",
+    paper_bgcolor = "white",
+    margin = list(l = 200, r = 80),
+    showlegend = FALSE
+  )
+```
+
+## Olum Sertifikati Evvel Yazilmis
+
+Olum sertifikatinin tarixi xestenin DEATHDATE-inden evvel olan hallar.
+
+```{r anomaly-cert-before-death}
+# Ölüm sertifikatı olan bütün encounterlar
+death_certs <- encounters[DESCRIPTION == "Death Certification",
+                           .(PATIENT, cert_date = DATE)]
+
+# Xestenin ölüm tarixi ile birleşdir
+cert_check <- death_certs[patients[!is.na(DEATHDATE), .(ID, DEATHDATE)],
+                           on = .(PATIENT = ID),
+                           nomatch = 0]
+
+# Sertifikat ölümden eVVeL yazılıb?
+cert_before <- cert_check[cert_date < DEATHDATE]
+
+cat("Sertifikat ölümden evvel yazılan xeste sayı:", nrow(cert_before), "\n")
+
+if (nrow(cert_before) > 0) {
+  cert_before[, ferq := as.integer(DEATHDATE - cert_date)]
+  print(cert_before[order(ferq)])
+}
+```
+
+```{r anomaly-cert-detail}
+# Şiddet kateqoriyası elave et
+cert_before[, severity := fcase(
+  ferq <= 7,    "1-7 gun",
+  ferq <= 365,  "8 gun - 1 il",
+  ferq <= 1095, "1-3 il",
+  default       = "3+ il (kritik)"
+)]
+
+# Xülase cedvel
+cat("=== Sertifikat Anomaliyasi — Detalli Baxis ===\n\n")
+print(cert_before[order(-ferq), .(
+  cert_date,
+  DEATHDATE,
+  il_evvel = round(ferq / 365.25, 1),
+  severity
+)])
+```
+
+```{r anomaly-cert-plot}
+cert_plot <- cert_before[order(ferq)]
+cert_plot[, xeste_label := paste0("X", .I)]
+cert_plot[, color := fcase(
+  ferq <= 7,    "#1D9E75",
+  ferq <= 365,  "#F4A261",
+  ferq <= 1095, "#D4537E",
+  default       = "#7F0000"
+)]
+
+plot_ly(data = cert_plot) |>
+  add_segments(
+    x = ~cert_date, xend = ~DEATHDATE,
+    y = ~xeste_label, yend = ~xeste_label,
+    line = list(color = ~color, width = 4),
+    hovertemplate = paste0(
+      "<b>%{y}</b><br>",
+      "Sertifikat: %{x}<br>",
+      "Olum: %{xend}<extra></extra>"
+    )
+  ) |>
+  add_trace(
+    x = ~cert_date, y = ~xeste_label,
+    type = "scatter", mode = "markers",
+    marker = list(color = ~color, size = 10, symbol = "square"),
+    name = "Sertifikat tarixi",
+    hovertemplate = "Sertifikat: %{x}<extra></extra>"
+  ) |>
+  add_trace(
+    x = ~DEATHDATE, y = ~xeste_label,
+    type = "scatter", mode = "markers",
+    marker = list(color = ~color, size = 12, symbol = "x"),
+    name = "Olum tarixi",
+    hovertemplate = "Olum: %{x}<extra></extra>"
+  ) |>
+  layout(
+    title = list(
+      text = "<b>Olum Sertifikati — Olumden Nece Muddet Evvel?</b><br><sup>11 xeste | kare = sertifikat tarixi, x = olum tarixi | Reng: anomaliyanin siddeti</sup>",
+      font = list(size = 13)
+    ),
+    xaxis = list(title = "Tarix"),
+    yaxis = list(title = "", categoryorder = "array",
+                 categoryarray = ~xeste_label),
+    showlegend = TRUE,
+    margin = list(l = 60)
+  )
+```
+
+## Olumden Sonra Vital Olcum
+
+Vefat etmis xestede olumunden sonraki encounter-de klinik olcumler
+qeyd edilibmi?
+
+```{r anomaly-ghost-vitals}
+# Ghost encounter ID-lerini ayır
+ghost_enc_ids <- ghost_encounters[
+  DESCRIPTION != "Death Certification"
+]$ID
+
+# Bu encounter-lerde observations var?
+ghost_obs <- observations[ENCOUNTER %in% ghost_enc_ids]
+
+cat("Ghost encounter-lerdeki ölçü sayı:", nrow(ghost_obs), "\n\n")
+
+if (nrow(ghost_obs) > 0) {
+  print(ghost_obs[, .(PATIENT, DATE, DESCRIPTION, VALUE, UNITS)])
+}
+```
+
+```{r anomaly-ghost-vitals-detail}
+# ba124b97 xestesinin deathdate-i
+key_patient <- "ba124b97-8544-488e-8d0a-176d5e81d38a"
+
+cat("=== Xestenin Ölüm Melumatı ===\n")
+print(patients[ID == key_patient, 
+               .(ID, BIRTHDATE, DEATHDATE, GENDER, RACE, age)])
+
+cat("\n=== Ölümden Sonra Qeyd Olunan Ölçüler ===\n")
+ghost_vitals <- ghost_obs[
+  PATIENT == key_patient & VALUE != "",
+  .(DATE, DESCRIPTION, VALUE, UNITS)
+][order(DATE, DESCRIPTION)]
+
+ghost_vitals[, days_after_death := as.integer(
+  DATE - patients[ID == key_patient]$DEATHDATE
+)]
+
+print(ghost_vitals)
+```
+
+## Encounter Qeydi Olmadan Vefat (Data Coverage Boslugu)
+
+Hec bir encounter qeydi olmadan vefat etmis xesteler — cox hissesi
+Synthea-nin simulyasiya dovrunun baslanmasından evvel vefat edenlerdir.
+
+```{r anomaly-no-encounter-death}
+# enc_count = NA → encounters cedvelinde heç bir qeydi yoxdur
+no_enc_dead <- master[!is.na(DEATHDATE) & is.na(enc_count)]
+
+cat("Encounter qeydi olmadan vefat eden xeste sayı:", nrow(no_enc_dead), "\n")
+cat("Bütün vefat edenlerin faizi:",
+    round(nrow(no_enc_dead) / nrow(master[!is.na(DEATHDATE)]) * 100, 1), "%\n\n")
+
+# Yaş paylanması
+no_enc_dead[, .(
+  N       = .N,
+  ort_yas = round(mean(age), 1),
+  min_yas = min(age),
+  max_yas = max(age)
+), by = GENDER][order(-N)]
+```
+
+```{r anomaly-no-enc-investigate}
+# Bu xestelerin ölüm tarixi paylanması
+cat("=== Ölüm tarixi xülasesi ===\n")
+print(no_enc_dead[, .(
+  min_death = min(DEATHDATE),
+  max_death = max(DEATHDATE),
+  median_death = median(DEATHDATE)
+)])
+
+# İller üzre ölüm sayı
+death_by_year <- no_enc_dead[, .N, by = year(DEATHDATE)][order(year)]
+cat("\nİller üzre paylanma (ilk ve son 5):\n")
+print(head(death_by_year, 5))
+print(tail(death_by_year, 5))
+
+# Encounters-in başlanğıc tarixi ile müqayise
+cat("\nEncounters-in en erken tarixi:",
+    as.character(min(encounters$DATE)), "\n")
+cat("No-encounter ölümlerinin en son tarixi:",
+    as.character(max(no_enc_dead$DEATHDATE)), "\n")
+```
+
+## Menfi HbA1c ve Duplikat Qeydler
+
+HbA1c menfi ola bilmez — bu bioloji cehetden mümkünsüzdür.
+17 xestede menfi deyer + her ölçüm duplikat qeyd edilib.
+
+```{r anomaly-negative-values}
+# Bioloji cehetden menfi ola bilmeyen ölçüleri tap
+neg_obs <- observations[
+  DESCRIPTION %in% c(
+    "Glucose",
+    "Body Height",
+    "Body Weight", 
+    "Body Mass Index",
+    "Systolic Blood Pressure",
+    "Diastolic Blood Pressure",
+    "Total Cholesterol",
+    "Triglycerides",
+    "Hemoglobin A1c/Hemoglobin.total in Blood",
+    "Creatinine",
+    "Calcium",
+    "Sodium"
+  ) & !is.na(value_num) & value_num <= 0,
+  .(PATIENT, DATE, DESCRIPTION, VALUE, value_num, UNITS)
+][order(value_num)]
+
+cat("Menfi/sıfır deyerli ölçü sayı:", nrow(neg_obs), "\n\n")
+
+if (nrow(neg_obs) > 0) {
+  print(neg_obs[, .N, by = .(DESCRIPTION, UNITS)][order(N)])
+  cat("\nen ekstremal 10 hal:\n")
+  print(head(neg_obs, 10))
+}
+```
+
+```{r anomaly-negative-hba1c-detail}
+neg_patient <- "41409534-96f0-41f1-97de-1650b3e1736f"
+
+# Xestenin profili
+cat("=== Xeste Profili ===\n")
+print(patients[ID == neg_patient,
+               .(ID, BIRTHDATE, DEATHDATE, GENDER, RACE, age)])
+
+# Neçe unikal tarix var?
+uniq_dates <- observations[
+  PATIENT == neg_patient & 
+  DESCRIPTION == "Hemoglobin A1c/Hemoglobin.total in Blood",
+  .(count = .N), by = DATE][order(DATE)]
+
+cat("\nHer ölçüm tarixindeki qeyd sayı:\n")
+print(uniq_dates)
+cat("\nUnikal tarix sayı:", nrow(uniq_dates), "\n")
+cat("Cemi qeyd sayı:", sum(uniq_dates$count), "\n")
+cat("Orta duplikat sayı (cemi/unikal):", 
+    round(sum(uniq_dates$count) / nrow(uniq_dates), 1), "\n")
+```
+
+```{r anomaly-neg-hba1c-scope}
+# Neçe unikal xestede menfi HbA1c var?
+neg_hba1c_pts <- observations[
+  DESCRIPTION == "Hemoglobin A1c/Hemoglobin.total in Blood" &
+  !is.na(value_num) & value_num < 0
+]
+
+cat("Menfi HbA1c olan unikal xeste sayı:", 
+    uniqueN(neg_hba1c_pts$PATIENT), "\n")
+cat("Unikal deyer sayı:", 
+    uniqueN(neg_hba1c_pts$value_num), "\n")
+cat("Mövcud unikal deyerler:\n")
+print(unique(neg_hba1c_pts$value_num))
+
+# Xeste başına qeyd sayı
+neg_hba1c_pts[, .(
+  qeyd_sayi = .N,
+  unikal_tarix = uniqueN(DATE),
+  deger = unique(value_num)
+), by = PATIENT][order(-qeyd_sayi)]
+```
+
+```{r anomaly-neg-hba1c-named}
+neg_hba1c_summary <- observations[
+  DESCRIPTION == "Hemoglobin A1c/Hemoglobin.total in Blood" &
+  !is.na(value_num) & value_num < 0
+][, .(
+  qeyd_sayi    = .N,
+  unikal_tarix = uniqueN(DATE),
+  min_deger    = min(value_num),
+  max_deger    = max(value_num)
+), by = PATIENT]
+
+# Patients cedvelinden ad elave et
+neg_hba1c_summary <- neg_hba1c_summary[
+  patients[, .(ID, ad = paste(FIRST, LAST), age, GENDER)],
+  on = .(PATIENT = ID),
+  nomatch = 0
+][order(-qeyd_sayi)]
+
+neg_hba1c_summary[, .(ad, age, GENDER, qeyd_sayi, unikal_tarix, min_deger, max_deger)]
+```
+
+```{r anomaly-neg-hba1c-clean}
+neg_hba1c_summary[, ad_temiz := gsub("[0-9]+", "", ad)]
+
+neg_hba1c_summary[, .(ad_temiz, age, GENDER, 
+                       qeyd_sayi, unikal_tarix, 
+                       min_deger, max_deger)]
+```
+
+## Data Integrity - BMI Tutarsizligi ve Olum Gunu Encounter
+
+BMI hesablanmis deyerle qeyd edilmis deyer arasinda ferq,
+ve olum gununde outpatient encounter qeydleri.
+
+```{r anomaly-data-integrity-triple}
+
+# ═══════════════════════════════════════════
+# 1) BMI vs BOY + ÇeKİ TUTARSIZLIĞI
+# ═══════════════════════════════════════════
+height_obs <- observations[DESCRIPTION == "Body Height" & !is.na(value_num),
+                           .(PATIENT, ENCOUNTER, height = value_num)]
+weight_obs <- observations[DESCRIPTION == "Body Weight" & !is.na(value_num),
+                           .(PATIENT, ENCOUNTER, weight = value_num)]
+bmi_obs    <- observations[DESCRIPTION == "Body Mass Index" & !is.na(value_num),
+                           .(PATIENT, ENCOUNTER, bmi_recorded = value_num)]
+
+bmi_check <- merge(height_obs, weight_obs, by = c("PATIENT", "ENCOUNTER")) |>
+             merge(bmi_obs,    by = c("PATIENT", "ENCOUNTER"))
+
+bmi_check[, bmi_calc := round(weight / (height / 100)^2, 1)]
+bmi_check[, ferq     := abs(bmi_recorded - bmi_calc)]
+
+bmi_incon <- bmi_check[ferq > 2][order(-ferq)]
+
+cat("=== 1) BMI Tutarsızlığı (ferq > 2) ===\n")
+cat("Tutarsız ölçü sayı:", nrow(bmi_incon), "\n")
+if (nrow(bmi_incon) > 0) {
+  cat("Maksimum ferq:", max(bmi_incon$ferq), "\n")
+  print(head(bmi_incon[, .(PATIENT, height, weight, bmi_recorded, bmi_calc, ferq)], 5))
+}
+
+# ═══════════════════════════════════════════
+# 2) EYNI XeSTeNİN BOYU 20+ SM DeYIŞIB
+# ═══════════════════════════════════════════
+height_range <- observations[
+  DESCRIPTION == "Body Height" & !is.na(value_num),
+  .(min_boy = min(value_num),
+    max_boy  = max(value_num),
+    olcu_n   = .N),
+  by = PATIENT
+][, ferq := max_boy - min_boy]
+
+height_anom <- height_range[ferq > 20][
+  patients[age >= 18, .(ID, age, GENDER)],
+  on  = .(PATIENT = ID),
+  nomatch = 0
+][order(-ferq)]
+
+cat("\n=== 2) Boy ferqi > 20sm (yetkin) ===\n")
+cat("Xeste sayı:", nrow(height_anom), "\n")
+if (nrow(height_anom) > 0) {
+  print(head(height_anom[, .(PATIENT, min_boy, max_boy, ferq, age, GENDER)], 8))
+}
+
+# ═══════════════════════════════════════════
+# 3) ÖLÜM GÜNÜNDe BAŞQA ENCOUNTER
+# ═══════════════════════════════════════════
+same_day_death <- encounters[
+  patients[!is.na(DEATHDATE), .(ID, DEATHDATE)],
+  on  = .(PATIENT = ID),
+  nomatch = 0
+][DATE == DEATHDATE & DESCRIPTION != "Death Certification"]
+
+cat("\n=== 3) Ölüm gününde başqa encounter ===\n")
+cat("Hadise sayı:", nrow(same_day_death), "\n")
+if (nrow(same_day_death) > 0) {
+  print(same_day_death[, .(PATIENT, DATE, DEATHDATE, DESCRIPTION)][1:10])
+}
+```
+
+```{r anomaly-death-day-types}
+# Ölüm günü encounter-lerini növe göre ayır
+same_day_by_type <- same_day_death[, .N, by = DESCRIPTION][order(-N)]
+
+cat("Encounter növü üzre paylanma:\n")
+print(same_day_by_type)
+
+cat("\nNormal izahlı (xestexanada ölüm):\n")
+normal_types <- c("Emergency room admission", "Emergency Encounter",
+                  "Hospital admission", "Encounter Inpatient",
+                  "Admission to surgical department",
+                  "Obstetric emergency hospital admission")
+
+cat("Normal: ", sum(same_day_death$DESCRIPTION %in% normal_types), "\n")
+cat("Şübheli:", sum(!same_day_death$DESCRIPTION %in% normal_types), "\n\n")
+
+# Şübheli olanlar
+suspicious_day <- same_day_death[!DESCRIPTION %in% normal_types]
+cat("Şübheli encounter növleri:\n")
+print(suspicious_day[, .N, by = DESCRIPTION][order(-N)])
+```
+
+```{r anomaly-bmi-inconsistency-detail}
+# Bu xestenin profili
+bmi_patient <- "8afa9148-b5f1-4916-91c1-f2790d656c33"
+
+cat("=== BMI Anomaliya Xestesi ===\n")
+print(patients[ID == bmi_patient, 
+               .(ID, BIRTHDATE, DEATHDATE, GENDER, RACE, age)])
+
+# Neçe encounter-dedir bu problem?
+cat("\nBu xestenin cemi BMI tutarsızlığı sayı:", 
+    nrow(bmi_incon[PATIENT == bmi_patient]), "\n")
+
+# Ümumi menzere: ferq paylanması
+cat("\nBMI ferqi paylanması (bütün 15,846 hal):\n")
+print(bmi_incon[, .(
+  N    = .N,
+  pct  = round(.N / nrow(bmi_incon) * 100, 1)
+), by = .(ferq_group = cut(ferq,
+    breaks = c(2, 5, 10, 20, Inf),
+    labels = c("2-5", "5-10", "10-20", "20+")
+))][order(ferq_group)])
+```
+
+## Identifikasiya Xetalari - SSN ve Pasport
+
+SSN ve pasport nomreleri unikal olmalidir. Duplikat tapintilari
+Synthea-nin generasiya algoritminin zeifliyini gosterir.
+
+```{r anomaly-duplicate-ssn}
+# Eyni SSN olan xesteleri tap
+dup_ssn <- patients[
+  !is.na(SSN) & SSN != "",
+  .(xeste_sayi = .N),
+  by = SSN
+][xeste_sayi > 1][order(-xeste_sayi)]
+
+cat("Duplikat SSN sayı:", nrow(dup_ssn), "\n")
+cat("Cemi elaqeli xeste sayı:", sum(dup_ssn$xeste_sayi), "\n\n")
+
+if (nrow(dup_ssn) > 0) {
+  cat("en çox paylaşılan SSN-ler:\n")
+  print(head(dup_ssn, 5))
+
+  # Bir nümuneye derinden bax
+  example_ssn <- dup_ssn$SSN[1]
+  cat("\n'", example_ssn, "' SSN-ni paylaşan xesteler:\n")
+  print(patients[SSN == example_ssn, .(
+    ad    = paste(gsub("[0-9]+", "", FIRST),
+                  gsub("[0-9]+", "", LAST)),
+    BIRTHDATE, GENDER, RACE, age
+  )])
+}
+```
+
+```{r anomaly-passport-duplicate}
+# "false" ve boş olmayan pasportları ayır
+has_passport <- patients[
+  !is.na(PASSPORT) & 
+  PASSPORT != "false" & 
+  PASSPORT != ""
+]
+
+cat("Pasportu olan xeste sayı:", nrow(has_passport), "\n")
+cat("Unikal pasport sayı:", uniqueN(has_passport$PASSPORT), "\n\n")
+
+# Duplikatları tap
+dup_passport <- has_passport[, .(
+  xeste_sayi = .N
+), by = PASSPORT][xeste_sayi > 1][order(-xeste_sayi)]
+
+cat("Duplikat pasport sayı:", nrow(dup_passport), "\n")
+cat("Cemi elaqeli xeste:", sum(dup_passport$xeste_sayi), "\n\n")
+
+if (nrow(dup_passport) > 0) {
+  cat("en çox paylaşılan pasportlar:\n")
+  print(head(dup_passport, 5))
+  
+  # Bir nümuneye bax
+  example_pp <- dup_passport$PASSPORT[1]
+  cat("\nPassport:", example_pp, "olan xesteler:\n")
+  print(has_passport[PASSPORT == example_pp, .(
+    ad    = paste(gsub("[0-9]+", "", FIRST),
+                  gsub("[0-9]+", "", LAST)),
+    BIRTHDATE, GENDER, RACE, age
+  )])
+}
+```
+
+
+## Drug Therapy Anomal Pattern
+
+```{r reason-analysis -2}
+# en çox rast gelinen müraciet sebebleri
+encounters[
+  REASONDESCRIPTION != "",
+  .N, by = REASONDESCRIPTION
+][order(-N)][1:20]
+```
+
+
+```{r drug-overdose-profile}
+# Drug overdose müracietlerinin profili
+overdose_enc <- encounters[REASONDESCRIPTION == "Drug overdose"]
+
+cat("Cemi drug overdose encounter sayı:", nrow(overdose_enc), "\n")
+cat("Unikal xeste sayı:", uniqueN(overdose_enc$PATIENT), "\n\n")
+
+# Bu xestelerin demografik profili
+overdose_pts <- patients[ID %in% overdose_enc$PATIENT,
+  .(N       = .N,
+    ort_yas = round(mean(age), 1),
+    min_yas = min(age),
+    max_yas = max(age)
+  ), by = GENDER]
+
+print(overdose_pts)
+```
+
+```{r drug-addiction-vs-overdose}
+# Drug addiction therapy keçirmiş xesteler
+addiction_pts <- encounters[
+  DESCRIPTION == "Drug addiction therapy",
+  unique(PATIENT)
+]
+
+# Overdose xesteleri
+overdose_pts_ids <- overdose_enc[, unique(PATIENT)]
+
+# Kesişme - hem addiction therapy hem overdose olanlar
+both <- intersect(addiction_pts, overdose_pts_ids)
+
+cat("Drug addiction therapy keçiren xeste:", length(addiction_pts), "\n")
+cat("Drug overdose olan xeste:", length(overdose_pts_ids), "\n")
+cat("Her ikisi olan xeste:", length(both), "\n")
+cat("Overdose xestelerinin neçesi therapy keçirib:",
+    round(length(both)/length(overdose_pts_ids)*100, 1), "%\n")
+```
+
+```{r overdose-vs-therapy-timeline}
+# Her ikisi olan xestelerde
+# evvelce overdose mu, therapy mi?
+both_timeline <- encounters[
+  PATIENT %in% both &
+  (REASONDESCRIPTION == "Drug overdose" |
+   DESCRIPTION == "Drug addiction therapy")
+][, .(
+  ilk_overdose = min(DATE[REASONDESCRIPTION == "Drug overdose"], na.rm = TRUE),
+  ilk_therapy  = min(DATE[DESCRIPTION == "Drug addiction therapy"], na.rm = TRUE)
+), by = PATIENT]
+
+both_timeline[, ardıcıllıq := fcase(
+  ilk_overdose < ilk_therapy, "Overdose → Therapy",
+  ilk_therapy < ilk_overdose, "Therapy → Overdose",
+  default = "Eyni gün"
+)]
+
+both_timeline[, .N, by = ardıcıllıq]
+```
+
+
+```{r therapy-to-overdose-gap}
+# Therapy → Overdose olan 623 xestede
+# iki hadise arasındakı vaxt ferqi
+gap_data <- both_timeline[ardıcıllıq == "Therapy → Overdose"]
+
+gap_data[, gun_ferqi := as.integer(ilk_overdose - ilk_therapy)]
+
+cat("Orta vaxt ferqi (gün):", round(mean(gap_data$gun_ferqi), 0), "\n")
+cat("Median vaxt ferqi (gün):", median(gap_data$gun_ferqi), "\n")
+cat("Min:", min(gap_data$gun_ferqi), "\n")
+cat("Max:", max(gap_data$gun_ferqi), "\n\n")
+
+# Qruplara böl
+gap_data[, muddet := fcase(
+  gun_ferqi <= 180,  "6 ay erzinde",
+  gun_ferqi <= 365,  "6-12 ay",
+  gun_ferqi <= 730,  "1-2 il",
+  default            = "2 il+"
+)]
+
+gap_data[, .N, by = muddet][order(N, decreasing = TRUE)]
+```
+```{r therapy-recidiv}
+# Therapy-e 2+ defe gedenleri tap
+therapy_count <- encounters[
+  DESCRIPTION == "Drug addiction therapy",
+  .(therapy_sayi = uniqueN(DATE)),
+  by = PATIENT
+]
+
+cat("1 defe therapy keçiren:", 
+    therapy_count[therapy_sayi == 1, .N], "\n")
+cat("2+ defe therapy keçiren:", 
+    therapy_count[therapy_sayi >= 2, .N], "\n")
+cat("3+ defe therapy keçiren:", 
+    therapy_count[therapy_sayi >= 3, .N], "\n")
+cat("Recidiv faizi (2+):", 
+    round(therapy_count[therapy_sayi >= 2, .N] / 
+          nrow(therapy_count) * 100, 1), "%\n")
+```
+
+
+```{r therapy-frequency}
+therapy_count[, .N, by = therapy_sayi][order(therapy_sayi)][1:15]
+```
+
+
+```{r therapy-frequency-full}
+# Maximum nece defe gedib?
+cat("Ən çox therapy sayi:", max(therapy_count$therapy_sayi), "\n")
+cat("Orta therapy sayi:", round(mean(therapy_count$therapy_sayi), 1), "\n")
+cat("Median therapy sayi:", median(therapy_count$therapy_sayi), "\n")
+
+# Qruplara bol
+therapy_count[, qrup := fcase(
+  therapy_sayi == 1,          "1 defe",
+  therapy_sayi <= 5,          "2-5 defe",
+  therapy_sayi <= 10,         "6-10 defe",
+  therapy_sayi <= 20,         "11-20 defe",
+  default                     = "20+ defe"
+)]
+
+therapy_count[, .N, by = qrup][order(N, decreasing = TRUE)]
+```
+```{r therapy-max}
+cat("En çox therapy sayi:", max(therapy_count$therapy_sayi), "\n")
+cat("Orta therapy sayi:", round(mean(therapy_count$therapy_sayi), 1), "\n")
+cat("Median therapy sayi:", median(therapy_count$therapy_sayi), "\n")
+```
+
+```{r drug-addiction-chart, fig.width=12, fig.height=7}
+library(ggplot2)
+
+# Qrup data
+qrup_data <- data.frame(
+  qrup  = c("1 defe", "2-5 defe", "6-10 defe", "11-20 defe", "20+ defe"),
+  sayi  = c(15, 92, 149, 410, 401),
+  faiz  = c(1.4, 8.6, 14.0, 38.4, 37.6)
+)
+
+qrup_data$qrup <- factor(qrup_data$qrup,
+  levels = c("1 defe", "2-5 defe", "6-10 defe", "11-20 defe", "20+ defe"))
+
+qrup_data$reng <- c("#A8D5BA", "#F4C97A", "#F0A868", "#E07560", "#C0392B")
+
+ggplot(qrup_data, aes(x = qrup, y = sayi, fill = qrup)) +
+  geom_col(width = 0.65) +
+  geom_text(aes(label = paste0(sayi, " xeste\n(", faiz, "%)")),
+            vjust = -0.5, size = 4.2, fontface = "bold", color = "#1E293B") +
+  scale_fill_manual(values = qrup_data$reng) +
+  scale_y_continuous(limits = c(0, 480), expand = c(0, 0)) +
+  labs(
+    title    = "Asililiq Müalicesine Qayidis Sayi",
+    subtitle = "1,067 xesteden 1,052-si (98.6%) müaliceye 2+ defe qayitmaq mecburiyyetinde qalib\nOrta qayidis: 17.8 defe | En cox: 47 defe | Therapy sonrasi overdose: 623 xeste",
+    x = "Therapy Sayi",
+    y = "Xeste Sayi"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title    = element_text(face = "bold", size = 18, color = "#1E293B"),
+    plot.subtitle = element_text(size = 12, color = "#64748B", lineheight = 1.4),
+    legend.position = "none",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor  = element_blank(),
+    axis.title = element_text(size = 13),
+    plot.margin = margin(20, 20, 20, 20)
+  )
+```
+
+```{r overdose-after-therapy-chart-fixed, fig.width=12, fig.height=7}
+overdose_data <- data.frame(
+  qrup = c("Overdose\nolmayan",
+           "Therapy sonrasi\noverdose olan"),
+  sayi = c(444, 623),
+  faiz = c(41.6, 58.4),
+  reng = c("#A8D5BA", "#C0392B")
+)
+
+ardic_data <- data.frame(
+  muddet = c("6 ay erzinde", "6-12 ay", "1-2 il", "2 il+"),
+  sayi   = c(69, 105, 166, 283),
+  faiz   = c(11.1, 16.9, 26.6, 45.4)
+)
+ardic_data$muddet <- factor(ardic_data$muddet,
+  levels = c("6 ay erzinde", "6-12 ay", "1-2 il", "2 il+"))
+
+library(gridExtra)
+
+p1 <- ggplot(overdose_data, aes(x = qrup, y = sayi, fill = qrup)) +
+  geom_col(width = 0.55) +
+  geom_text(aes(label = paste0(sayi, " xeste\n(", faiz, "%)")),
+            vjust = -0.5, size = 4.5, fontface = "bold", color = "#1E293B") +
+  scale_fill_manual(values = c("#A8D5BA", "#C0392B")) +
+  scale_y_continuous(limits = c(0, 750), expand = c(0, 0)) +
+  labs(
+    title    = "Therapy Keçiren Xestelerde Overdose",
+    subtitle = "1,067 therapy xestesinden 623-u (58.4%) overdose-a ducar olub",
+    x = NULL, y = "Xeste Sayi"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title    = element_text(face = "bold", size = 15, color = "#1E293B"),
+    plot.subtitle = element_text(size = 11, color = "#64748B"),
+    legend.position = "none",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor   = element_blank()
+  )
+
+p2 <- ggplot(ardic_data, aes(x = muddet, y = sayi, fill = muddet)) +
+  geom_col(width = 0.6) +
+  geom_text(aes(label = paste0(sayi, "\n(", faiz, "%)")),
+            vjust = -0.5, size = 4.2, fontface = "bold", color = "#1E293B") +
+  scale_fill_manual(values = c("#F4C97A", "#F0A868", "#E07560", "#C0392B")) +
+  scale_y_continuous(limits = c(0, 340), expand = c(0, 0)) +
+  labs(
+    title    = "Therapy-den Overdose-a Kecen Vaxt",
+    subtitle = "623 xestede therapy ile overdose arasindaki muddet",
+    x = NULL, y = "Xeste Sayi"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title    = element_text(face = "bold", size = 15, color = "#1E293B"),
+    plot.subtitle = element_text(size = 11, color = "#64748B"),
+    legend.position = "none",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor   = element_blank()
+  )
+
+grid.arrange(p1, p2, ncol = 2)
+```
+
+
+
+#  Proqnoz — Encounter Volume Forecasting
+
+## Aylig Muracieat Sayinin Hesablanmasi
+
+```{r enc-aggregate}
+# Il ve ay sutunlari yarat
+encounters[, IL := year(DATE)]
+encounters[, AY := month(DATE)]
+
+# Yalniz 2011 ve sonrasi
+aylig_data <- encounters[IL >= 2011, .N, by = .(IL, AY)]
+
+# Tarixe gore sirala
+aylig_data <- aylig_data[order(IL, AY)]
+
+# Neticeye bax
+head(aylig_data, 12)
+```
+
+
+
+## Zaman Sirasi Obyektinin Yaradilmasi
+
+```{r ts-create}
+# Zaman sirasi yarat
+# start = c(2011, 1) → 2011-ci ilin 1-ci ayi
+# frequency = 12    → aylig data (ilde 12 olcum)
+
+enc_ts <- ts(
+  data      = aylig_data$N,
+  start     = c(2011, 1),
+  frequency = 12
+)
+
+# Neticeye bax
+print(enc_ts)
+```
+
+
+##  Vizuallashdirma
+
+```{r ts-plot}
+autoplot(enc_ts) +
+  labs(
+    title    = "Aylig Encounter Sayi (2011-2017)",
+    subtitle = "Synthea Hospital — Zaman Sirasi",
+    x        = "Tarix",
+    y        = "Encounter Sayi"
+  ) +
+  theme_minimal()
+```
+
+
+
+
+##  2017-ni Cixaririq
+
+```{r ts-trim}
+# Yalniz 2011-2016 - tam illar
+aylig_temiz <- aylig_data[IL <= 2016]
+
+# Yeni temiz zaman sirasi
+enc_ts_temiz <- ts(
+  data      = aylig_temiz$N,
+  start     = c(2011, 1),
+  frequency = 12
+)
+
+# Yeniden vizuallashdir
+autoplot(enc_ts_temiz) +
+  labs(
+    title    = "Aylig Encounter Sayi (2011-2016)",
+    subtitle = "Temizlenmish Zaman Sirasi — 2017 Ciхarildi",
+    x        = "Tarix",
+    y        = "Encounter Sayi"
+  ) +
+  theme_minimal()
+```
+## 3.4 Parchаlanma (Decomposition)
+
+```{r ts-decompose}
+# Parchala
+decomp <- decompose(enc_ts_temiz)
+
+# Vizuallashdir
+autoplot(decomp) +
+  labs(
+    title = "Zaman Sirasi Parchalanmasi",
+    subtitle = "Trend + Mosumuylik + Qaliq"
+  ) +
+  theme_minimal()
+```
+## Stasionarlig Testi (ADF) Augmented Dickey Fuller
+
+```{r adf-test}
+# ADF testi
+adf_result <- adf.test(enc_ts_temiz)
+
+# Netice
+print(adf_result)
+```
+
+
+## ACF ve PACF Analizi
+
+```{r acf-pacf}
+par(mfrow = c(1, 2))  # 2 qrafik yan-yana
+
+acf(enc_ts_temiz,
+    lag.max = 24,
+    main    = "ACF — Avtokorrelyasiya")
+
+pacf(enc_ts_temiz,
+     lag.max = 24,
+     main    = "PACF — Qismen Avtokorrelyasiya")
+```
+
+
+
+##  ARIMA Modeli
+
+```{r arima-model}
+# Optimal ARIMA modeli tap
+model <- auto.arima(
+  enc_ts_temiz,
+  seasonal    = TRUE,   # Mosumuylik nezere alinsin
+  stepwise    = FALSE,  # Butun kombinasiyalari yoxla
+  approximation = FALSE # Deqiq hesablama
+)
+
+# Modele bax
+summary(model)
+```
+
+## Proqnoz — Gelecek 24 Ay
+
+```{r forecast-24-fixed}
+proqnoz_24 <- forecast(model, h = 24)
+
+autoplot(proqnoz_24) +
+  labs(
+    title    = "Encounter Sayi Proqnozu — 2017-2018",
+    subtitle = "ARIMA(0,0,0)(2,1,1)[12] — 24 Aylig Forecast",
+    x        = "Tarix",
+    y        = "Encounter Sayi"
+  ) +
+  scale_x_continuous(
+    breaks = seq(2011, 2019, by = 1),
+    labels = seq(2011, 2019, by = 1)
+  ) +
+  theme_minimal()
+```
+##  Deqiqlik Olculeri
+
+```{r accuracy}
+# Deqiqlik olculeri
+accuracy(model)
+```
+
+
+##  Train/Test Yoxlaması
+
+```{r train-test}
+# Train: 2011-2015
+train <- window(enc_ts_temiz, 
+                start = c(2011, 1), 
+                end   = c(2015, 12))
+
+# Test: 2016
+test <- window(enc_ts_temiz, 
+               start = c(2016, 1))
+
+# Train üzərinde model qur
+model_train <- auto.arima(
+  train,
+  seasonal      = TRUE,
+  stepwise      = FALSE,
+  approximation = FALSE
+)
+
+# 2016-ni proqnozlashdir
+proqnoz_test <- forecast(model_train, h = 12)
+
+# Real vs Proqnoz müqayisesi
+accuracy(proqnoz_test, test)
+```
+
+
+
+```{r prez-fix-6-charts, message=FALSE, warning=FALSE}
+library(data.table); library(ggplot2); library(scales)
+if (!requireNamespace("ragg", quietly = TRUE)) install.packages("ragg")
+if (!requireNamespace("systemfonts", quietly = TRUE)) install.packages("systemfonts")
+library(systemfonts)
+
+# !!! VACİB: showtext-i söndür ki, ragg-ın düzgün rendering-i işləsin !!!
+if (requireNamespace("showtext", quietly = TRUE)) showtext::showtext_auto(FALSE)
+
+# Azərbaycan hərflərini TAM dəstəkləyən şrifti avtomatik seç
+av <- systemfonts::system_fonts()$family
+AZ <- if ("Arial" %in% av) "Arial" else
+      if ("Segoe UI" %in% av) "Segoe UI" else
+      if ("Tahoma" %in% av) "Tahoma" else
+      if ("DejaVu Sans" %in% av) "DejaVu Sans" else "sans"
+cat("Secilen srift:", AZ, "\n")
+
+out_dir <- "prezentasiya_qrafikler"; dir.create(out_dir, showWarnings = FALSE)
+save_png <- function(plot, file, w = 9, h = 6) {
+  path <- file.path(out_dir, file)
+  ragg::agg_png(path, width = w, height = h, units = "in", res = 200)
+  print(plot); dev.off(); cat("Yazildi:", path, "\n")
+}
+
+mavi <- "#185FA5"; yasil <- "#1D9E75"; qirmizi <- "#C0392B"
+sari <- "#EF9F27"; pembe <- "#D4537E"; boz <- "grey60"
+
+tema_bar <- theme_minimal(base_size = 16, base_family = AZ) +
+  theme(text = element_text(family = AZ),
+        plot.title = element_text(face="bold", size=22, color="#1E293B"),
+        plot.subtitle = element_text(size=14, color="grey45"),
+        legend.position = "none", panel.grid.minor = element_blank(),
+        panel.grid.major.y = element_blank(), axis.text = element_text(size=14))
+
+make_pie <- function(labels, values, title, sub, palette, file) {
+  d <- data.frame(kat = factor(labels, levels = labels), n = values)
+  d$pct <- round(100 * d$n / sum(d$n), 1)
+  p <- ggplot(d, aes(x = "", y = n, fill = kat)) +
+    geom_col(width = 1, color = "white", linewidth = 2) + coord_polar(theta = "y") +
+    geom_text(aes(label = paste0(pct, "%")), position = position_stack(vjust = 0.5),
+              size = 4.3, fontface = "bold", color = "white", family = AZ) +
+    scale_fill_manual(values = palette, name = NULL) +
+    labs(title = title, subtitle = sub) +
+    theme_void(base_size = 16, base_family = AZ) +
+    theme(text = element_text(family = AZ),
+          plot.title = element_text(face="bold", size=22, hjust=0.5, color="#1E293B"),
+          plot.subtitle = element_text(size=14, color="grey45", hjust=0.5, margin=margin(b=8)),
+          legend.position = "right", legend.text = element_text(size=15))
+  save_png(p, file, w = 9, h = 6)
+}
+
+# ① ÖLÜM SƏBƏBLƏRİ
+olum_seb <- data.frame(
+  seb = c("Ağciyər xərçəngi","Miokard infarktı","Ağciyər emfizeması",
+          "Xroniki obstruktiv bronxit","İnsult","Ürək dayanması","Pnevmoniya","Alzheimer xəstəliyi"),
+  faiz = c(9.6, 8.6, 6.1, 6.1, 3.7, 2.1, 1.9, 1.2))
+olum_seb$seb <- factor(olum_seb$seb, levels = rev(olum_seb$seb))
+p <- ggplot(olum_seb, aes(x = seb, y = faiz)) +
+  geom_col(fill = pembe, width = 0.72) +
+  geom_text(aes(label = paste0(faiz,"%")), hjust = -0.15, size = 4.2, fontface="bold", family=AZ) +
+  coord_flip() + scale_y_continuous(expand = expansion(mult = c(0,0.15))) +
+  labs(title = "Ölüm Səbəbləri Reytinqi", subtitle = "33,074 vəfat etmiş xəstə üzərində",
+       x = NULL, y = "Vəfat edənlərin payı (%)") + tema_bar
+save_png(p, "06_olum_sebebleri.png", w = 10, h = 6.5)
+
+# ② MƏDƏNİ VƏZİYYƏT — PIE
+m <- patients[, .N, by = MARITAL]
+make_pie(c("Evli","Subay","Qeyd edilməyib"),
+         c(m[MARITAL=="M", N], m[MARITAL=="S", N], m[MARITAL=="", N]),
+         "Mədəni Vəziyyət", paste0(format(nrow(patients), big.mark=","), " xəstə"),
+         c(yasil, sari, boz), "02_marital_pie.png")
+
+# ③ MÜRACİƏT NÖVLƏRİ
+az_enc <- c("Outpatient Encounter"="Ambulator müraciət","Encounter for symptom"="Simptom müraciəti",
+  "Outpatient procedure"="Ambulator prosedur","Prenatal visit"="Prenatal ziyarət",
+  "Encounter for 'check-up'"="Profilaktik müayinə","Patient encounter procedure"="Xəstə müraciət proseduru",
+  "Emergency room admission"="Təcili yardıma qəbul","Encounter for problem"="Problem müraciəti",
+  "Drug addiction therapy"="Asılılıq müalicəsi","Asthma follow-up"="Astma izləməsi")
+enc10 <- encounters[, .N, by = DESCRIPTION][order(-N)][1:10]
+enc10[, az := az_enc[DESCRIPTION]]; enc10[is.na(az), az := DESCRIPTION]
+enc10[, az := factor(az, levels = rev(az))]
+p <- ggplot(enc10, aes(x = az, y = N)) +
+  geom_col(fill = mavi, width = 0.72) +
+  geom_text(aes(label = format(N, big.mark=",")), hjust = -0.12, size = 3.8, fontface="bold", family=AZ) +
+  coord_flip() + scale_y_continuous(labels = label_comma(), expand = expansion(mult = c(0,0.18))) +
+  labs(title = "Ən Çox Rast Gəlinən Müraciət Növləri", subtitle = "Bütün dövr üzrə müraciətlərin sayı",
+       x = NULL, y = "Müraciət sayı") + tema_bar
+save_png(p, "07_muraciet_novleri.png", w = 10.5, h = 6.5)
+
+# ④ ASILILIQ — QAYIDIŞ SAYI
+qrup_data <- data.frame(
+  qrup = factor(c("1 dəfə","2-5 dəfə","6-10 dəfə","11-20 dəfə","20+ dəfə"),
+                levels = c("1 dəfə","2-5 dəfə","6-10 dəfə","11-20 dəfə","20+ dəfə")),
+  sayi = c(15, 92, 149, 410, 401), faiz = c(1.4, 8.6, 14.0, 38.4, 37.6),
+  reng = c("#A8D5BA","#F4C97A","#F0A868","#E07560","#C0392B"))
+p <- ggplot(qrup_data, aes(x = qrup, y = sayi, fill = qrup)) +
+  geom_col(width = 0.68) +
+  geom_text(aes(label = paste0(sayi," xəstə\n(",faiz,"%)")), vjust = -0.4,
+            size = 4, fontface = "bold", color = "#1E293B", family=AZ) +
+  scale_fill_manual(values = qrup_data$reng) +
+  scale_y_continuous(limits = c(0,480), expand = c(0,0)) +
+  labs(title = "Asılılıq Müalicəsinə Qayıdış Sayı",
+       subtitle = "1,067 xəstədən 1,052-si (98.6%) müalicəyə 2+ dəfə qayıdıb  |  Orta: 17.8 dəfə  |  Ən çox: 47 dəfə",
+       x = "Müalicəyə qayıdış sayı", y = "Xəstə sayı") +
+  theme_minimal(base_size = 15, base_family = AZ) +
+  theme(text = element_text(family=AZ), plot.title = element_text(face="bold", size=20, color="#1E293B"),
+        plot.subtitle = element_text(size=11.5, color="grey45"),
+        legend.position = "none", panel.grid.major.x = element_blank(), panel.grid.minor = element_blank())
+save_png(p, "09_asililiq_qayidis.png", w = 11.5, h = 6.5)
+
+# ⑤ OVERDOSE — PIE
+make_pie(c("Müalicədən sonra overdose","Overdose olmayıb"), c(623, 444),
+         "Müalicə Keçənlərdə Overdose", "1,067 müalicə xəstəsindən",
+         c(qirmizi, "#A8D5BA"), "10_overdose_pie.png")
+
+# ⑥ OVERDOSE — VAXT BÖLGÜSÜ
+ardic_data <- data.frame(
+  muddet = factor(c("6 ay ərzində","6-12 ay","1-2 il","2 il+"),
+                  levels = c("6 ay ərzində","6-12 ay","1-2 il","2 il+")),
+  sayi = c(69, 105, 166, 283), faiz = c(11.1, 16.9, 26.6, 45.4),
+  reng = c("#F4C97A","#F0A868","#E07560","#C0392B"))
+p <- ggplot(ardic_data, aes(x = muddet, y = sayi, fill = muddet)) +
+  geom_col(width = 0.62) +
+  geom_text(aes(label = paste0(sayi,"\n(",faiz,"%)")), vjust = -0.4,
+            size = 4, fontface = "bold", color = "#1E293B", family=AZ) +
+  scale_fill_manual(values = ardic_data$reng) +
+  scale_y_continuous(limits = c(0,340), expand = c(0,0)) +
+  labs(title = "Müalicədən Overdose-a Keçən Vaxt",
+       subtitle = "623 xəstədə müalicə ilə overdose arasındakı müddət",
+       x = NULL, y = "Xəstə sayı") +
+  theme_minimal(base_size = 15, base_family = AZ) +
+  theme(text = element_text(family=AZ), plot.title = element_text(face="bold", size=20, color="#1E293B"),
+        plot.subtitle = element_text(size=12, color="grey45"),
+        legend.position = "none", panel.grid.major.x = element_blank(), panel.grid.minor = element_blank())
+save_png(p, "11_overdose_vaxt.png", w = 10, h = 6.5)
+```
+
+```{r data-dump-for-charts}
+# Yaş qrupları
+master[, yqr := cut(age, breaks=c(0,10,20,30,40,50,60,70,80,90,Inf),
+   labels=c("0-9","10-19","20-29","30-39","40-49","50-59","60-69","70-79","80-89","90+"), right=FALSE)]
+cat("### YAS_QRUP_SAYI\n"); print(master[!is.na(yqr), .N, by=yqr][order(yqr)])
+cat("### OLUM_YAS_FAIZ\n"); print(master[!is.na(yqr), .(faiz=round(100*mean(!is.na(DEATHDATE)),1)), by=yqr][order(yqr)])
+
+# BMI bölgüsü
+cat("### BMI_BINS\n"); print(table(cut(master[!is.na(bmi) & bmi>10 & bmi<60]$bmi, breaks=seq(10,60,2))))
+
+# İllik və aylıq müraciət
+cat("### ILLIK\n"); print(encounters[year(DATE)>=2011 & year(DATE)<=2017, .N, by=.(il=year(DATE))][order(il)])
+cat("### AYLIQ\n"); print(encounters[year(DATE)>=2011 & year(DATE)<=2017, .N, by=.(ay=month(DATE))][order(ay)])
+
+# ARIMA tarixi seriya və proqnoz
+cat("### TS_START:", start(enc_ts_temiz), "| FREQ:", frequency(enc_ts_temiz), "\n")
+cat("### TS_DATA\n"); cat(round(as.numeric(enc_ts_temiz)), sep=", "); cat("\n")
+cat("### PROQNOZ_MEAN\n"); cat(round(as.numeric(proqnoz_24$mean)), sep=", "); cat("\n")
+cat("### PROQNOZ_LOWER\n"); cat(round(as.numeric(proqnoz_24$lower[,2])), sep=", "); cat("\n")
+cat("### PROQNOZ_UPPER\n"); cat(round(as.numeric(proqnoz_24$upper[,2])), sep=", "); cat("\n")
+```
